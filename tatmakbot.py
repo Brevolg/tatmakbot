@@ -29,14 +29,14 @@ if not TELEGRAM_TOKEN:
     raise SystemExit(1)
 
 ids = os.environ.get("ADMIN_ID", "")
-ADMIN_ID = [int(i) for i in ids.split(",")]
+try:
+    ADMIN_ID = [int(i.strip()) for i in ids.split(",") if i.strip()]
+except ValueError:
+    logging.critical("ADMIN_ID must contain only integers")
+    raise SystemExit(1)
+
 if not ADMIN_ID:
     logging.critical("No ADMIN_ID was provided")
-    raise SystemExit(1)
-try:
-    ADMIN_ID = int(ADMIN_ID[0])
-except ValueError:
-    logging.critical("ADMIN_ID must be an integer")
     raise SystemExit(1)
 
 CHOOSE_DISH_ADD, ENTER_QUANTITY_ADD = range(2)
@@ -58,7 +58,7 @@ MENU: List[List[Any]] = [
     ["Пицца с сыром", 150],
     ["Пицца с колбасой", 170],
     ["Карри-мини", 205],
-    ["Барбекю", 205],
+    ["Барбекю", 205]
 ]
 DISH_PRICE = {dish: price for dish, price in MENU}
 
