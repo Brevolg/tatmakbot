@@ -28,12 +28,13 @@ if not TELEGRAM_TOKEN:
     logging.critical("No bot token was provided")
     raise SystemExit(1)
 
-ADMIN_ID = os.environ.get("ADMIN_ID")
+ids = os.environ.get("ADMIN_ID", "")
+ADMIN_ID = [int(i) for i in ids.split(",")]
 if not ADMIN_ID:
     logging.critical("No ADMIN_ID was provided")
     raise SystemExit(1)
 try:
-    ADMIN_ID = int(ADMIN_ID)
+    ADMIN_ID = int(ADMIN_ID[0])
 except ValueError:
     logging.critical("ADMIN_ID must be an integer")
     raise SystemExit(1)
@@ -57,6 +58,7 @@ MENU: List[List[Any]] = [
     ["Пицца с сыром", 150],
     ["Пицца с колбасой", 170],
     ["Карри-мини", 205],
+    ["Барбекю", 205],
 ]
 DISH_PRICE = {dish: price for dish, price in MENU}
 
@@ -269,7 +271,7 @@ async def remove(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def over(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.effective_user.id != ADMIN_ID:
+    if update.effective_user.id not in ADMIN_ID:
         await update.message.reply_text("⛔ У тебя нет доступа, лошара")
         return
 
