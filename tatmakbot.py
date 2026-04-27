@@ -39,9 +39,7 @@ if not ADMIN_ID:
     logging.critical("No ADMIN_ID was provided")
     raise SystemExit(1)
 
-CHOOSE_DISH_ADD, ENTER_QUANTITY_ADD = range(2)
-CHOOSE_DISH_MODIFY, ENTER_NEW_QUANTITY = range(2, 4)
-ENTER_DISCOUNT = 4
+CHOOSE_DISH_ADD, ENTER_QUANTITY_ADD, CHOOSE_DISH_MODIFY, ENTER_NEW_QUANTITY, ENTER_DISCOUNT = range(5)
 
 MAX_ITEMS_PER_USER = 10
 CONVERSATION_TIMEOUT = 120
@@ -176,6 +174,55 @@ def calculate_total(chat_id: int) -> Tuple[str, int]:
     lines.append(f"🧾 ОБЩАЯ СУММА: {grand_total} руб.")
     return "\n".join(lines), grand_total
 
+def calculate_total_with_discount(chat_id: int, discount: int) -> Tuple[str, int]:
+    if chat_id not in orders or not orders[chat_id]:
+        return "Заказов пока нет", 0
+
+    lines = [f"💰 Расчёт заказа со скидкой {discount}%:"]
+    grand_total = 0
+    grand_discount = 0
+    grand_final_total = 0
+
+    for _, data in orders[chat_id].items():
+        name = data["name"]
+        alias = data["alias"]
+        items = data["items"]
+        if not items:
+            continue
+
+        user_lines = [f"👤 {name} ({alias}):"]
+        user_total = 0
+        for dish, qty in items.items():
+            price = DISH_PRICE.get(dish)
+            if price is None:
+                cost_str = "? руб."
+            else:
+                cost = price * qty
+                cost_str = f"{cost} руб."
+                user_total += cost
+            user_lines.append(f"  • {dish} x{qty} = {cost_str}")
+
+        user_discount = int(user_total * discount / 100)
+        user_final_total = user_total - user_discount
+
+        user_lines.append(f"  Итого: {user_total} руб.")
+        user_lines.append(f"  Скидка {discount}%: -{user_discount} руб.")
+        user_lines.append(f"  К оплате: {user_final_total} руб.")
+        lines.extend(user_lines)
+
+        grand_total += user_total
+        grand_discount += user_discount
+        grand_final_total += user_final_total
+
+    if len(lines) == 1:
+        return "Нет позиций для расчёта", 0
+
+    lines.append("━━━━━━━━━━━━━━━━━━")
+    lines.append(f"🧾 ОБЩАЯ СУММА: {grand_total} руб.")
+    lines.append(f"💸 ОБЩАЯ СКИДКА: -{grand_discount} руб.")
+    lines.append(f"💳 ИТОГО СО СКИДКОЙ: {grand_final_total} руб.")
+    return "\n".join(lines), grand_final_total
+
 
 def get_session(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> Dict[str, Any]:
     sessions = context.user_data.setdefault("sessions", {})
@@ -208,6 +255,14 @@ async def send_quantity_prompt(
         )
 
     sent = await source_message.reply_text(text)
+    return sent.message_id
+
+
+async def send_discount_prompt(source_message: Message) -> int:
+    sent = await source_message.reply_text(
+        "Введите размер скидки ОТВЕТОМ на это сообщение\n"
+        "Только целое число от 0 до 100"
+    )
     return sent.message_id
 
 
@@ -258,31 +313,15 @@ async def total(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text, _ = calculate_total(update.effective_chat.id)
     await update.message.reply_text(text)
 
-async def send_discount_prompt(source_message: Message) -> int:
-    text = (
-        "Введите размер скидки ОТВЕТОМ на это сообщение\n"
-        "От 0 до 100, введешь другое и за тобой придут пара крепких ребят"
-    )
-    sent = await source_message.reply_text(text)
-    return sent.message_id
-
-
-def format_percent(value: float) -> str:
-    if value.is_integer():
-        return str(int(value))
-    return str(value).rstrip("0").rstrip(".")
-
-
 async def total_with_discount_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     chat_id = update.effective_chat.id
     session = get_session(context, chat_id)
     session.clear()
-    session["operation"] = "расчёт заказа со скидкой"
+    session["operation"] = "расчёт со скидкой"
 
-    text, grand_total = calculate_total(chat_id)
-    if grand_total == 0:
+    if chat_id not in orders or not orders[chat_id]:
         clear_session(context, chat_id)
-        await update.message.reply_text(text)
+        await update.message.reply_text("Заказов пока нет")
         return ConversationHandler.END
 
     prompt_message_id = await send_discount_prompt(update.message)
@@ -301,39 +340,28 @@ async def total_with_discount_enter(update: Update, context: ContextTypes.DEFAUL
         if wrong_attempts >= 2:
             clear_session(context, chat_id)
             await update.message.reply_text(
-                "Ну ты и дурак, давай по новой: /total_with_discount"
+                "Ввод отменён. Начните заново: /total_with_discount"
             )
             return ConversationHandler.END
 
         await update.message.reply_text(
             "Ответьте именно на сообщение бота с запросом скидки. "
-            "Если отправите не туда ещё раз, я заберу все ваше имущество."
+            "Если отправишь не туда ещё раз, будешь платить без скидки"
         )
         return ENTER_DISCOUNT
 
+    raw_discount = update.message.text.strip().replace("%", "")
     try:
-        discount = float(update.message.text.replace(",", "."))
+        discount = int(raw_discount)
         if discount < 0 or discount > 100:
             raise ValueError
     except ValueError:
-        await update.message.reply_text("Какую какую скидку ты хочешь? Не пойдет, давай от 0 до 100")
+        await update.message.reply_text("А ты я смотрю шутник, скидка должна быть от 0 до 100")
         return ENTER_DISCOUNT
 
-    text, grand_total = calculate_total(chat_id)
-    if grand_total == 0:
-        clear_session(context, chat_id)
-        await update.message.reply_text(text)
-        return ConversationHandler.END
-
-    discount_amount = round(grand_total * discount / 100)
-    total_after_discount = grand_total - discount_amount
-
+    text, _ = calculate_total_with_discount(chat_id, discount)
     clear_session(context, chat_id)
-    await update.message.reply_text(
-        f"{text}\n"
-        f"Скидка {format_percent(discount)}%: -{discount_amount} руб.\n"
-        f"ИТОГО СО СКИДКОЙ: {total_after_discount} руб."
-    )
+    await update.message.reply_text(text)
     return ConversationHandler.END
 
 
@@ -389,7 +417,7 @@ async def timeout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
         await context.bot.send_message(
             chat_id=chat_id,
-            text=f"Время ожидания истекло, {operation} отменено. Начните заново нужной командой",
+            text=f"Время ожидания истекло, {operation} отменено. Начните заново командой /add, /modify или /total_with_discount",
         )
     except Exception as e:
         logger.exception("Не удалось отправить сообщение о таймауте: %s", e)
@@ -545,7 +573,7 @@ async def modify_enter_quantity(update: Update, context: ContextTypes.DEFAULT_TY
         if wrong_attempts >= 2:
             clear_session(context, chat_id)
             await update.message.reply_text(
-                "❌ Ввод отменён. Начните заново: /add"
+                "Ввод отменён. Начните заново: /modify"
             )
             return ConversationHandler.END
 
@@ -553,7 +581,7 @@ async def modify_enter_quantity(update: Update, context: ContextTypes.DEFAULT_TY
             "Ответьте именно на сообщение бота с запросом количества "
             "Если отправите не туда ещё раз, я заберу все ваше имущество"
         )
-        return ENTER_QUANTITY_ADD
+        return ENTER_NEW_QUANTITY
 
     try:
         new_qty = int(update.message.text)
