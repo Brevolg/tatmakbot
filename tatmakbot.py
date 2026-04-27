@@ -41,6 +41,7 @@ if not ADMIN_ID:
 
 CHOOSE_DISH_ADD, ENTER_QUANTITY_ADD = range(2)
 CHOOSE_DISH_MODIFY, ENTER_NEW_QUANTITY = range(2, 4)
+ENTER_DISCOUNT = 4
 
 MAX_ITEMS_PER_USER = 10
 CONVERSATION_TIMEOUT = 120
@@ -229,6 +230,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/menu - показать меню\n"
         "/list - показать текущий заказ\n"
         "/total - показать стоимость заказов\n"
+        "/total_with_discount - показать стоимость заказов со скидкой\n"
         "/add - добавить блюдо в заказ\n"
         "/modify - изменить количество блюда\n"
         "/remove - удалить свой заказ\n"
@@ -255,6 +257,84 @@ async def list_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 async def total(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text, _ = calculate_total(update.effective_chat.id)
     await update.message.reply_text(text)
+
+async def send_discount_prompt(source_message: Message) -> int:
+    text = (
+        "Введите размер скидки ОТВЕТОМ на это сообщение\n"
+        "От 0 до 100, введешь другое и за тобой придут пара крепких ребят"
+    )
+    sent = await source_message.reply_text(text)
+    return sent.message_id
+
+
+def format_percent(value: float) -> str:
+    if value.is_integer():
+        return str(int(value))
+    return str(value).rstrip("0").rstrip(".")
+
+
+async def total_with_discount_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    chat_id = update.effective_chat.id
+    session = get_session(context, chat_id)
+    session.clear()
+    session["operation"] = "расчёт заказа со скидкой"
+
+    text, grand_total = calculate_total(chat_id)
+    if grand_total == 0:
+        clear_session(context, chat_id)
+        await update.message.reply_text(text)
+        return ConversationHandler.END
+
+    prompt_message_id = await send_discount_prompt(update.message)
+    session["prompt_message_id"] = prompt_message_id
+    return ENTER_DISCOUNT
+
+
+async def total_with_discount_enter(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    chat_id = update.effective_chat.id
+    session = get_session(context, chat_id)
+
+    if not is_expected_reply(update, session.get("prompt_message_id"), context.bot.id):
+        wrong_attempts = session.get("wrong_attempts", 0) + 1
+        session["wrong_attempts"] = wrong_attempts
+
+        if wrong_attempts >= 2:
+            clear_session(context, chat_id)
+            await update.message.reply_text(
+                "Ну ты и дурак, давай по новой: /total_with_discount"
+            )
+            return ConversationHandler.END
+
+        await update.message.reply_text(
+            "Ответьте именно на сообщение бота с запросом скидки. "
+            "Если отправите не туда ещё раз, я заберу все ваше имущество."
+        )
+        return ENTER_DISCOUNT
+
+    try:
+        discount = float(update.message.text.replace(",", "."))
+        if discount < 0 or discount > 100:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("Какую какую скидку ты хочешь? Не пойдет, давай от 0 до 100")
+        return ENTER_DISCOUNT
+
+    text, grand_total = calculate_total(chat_id)
+    if grand_total == 0:
+        clear_session(context, chat_id)
+        await update.message.reply_text(text)
+        return ConversationHandler.END
+
+    discount_amount = round(grand_total * discount / 100)
+    total_after_discount = grand_total - discount_amount
+
+    clear_session(context, chat_id)
+    await update.message.reply_text(
+        f"{text}\n"
+        f"Скидка {format_percent(discount)}%: -{discount_amount} руб.\n"
+        f"ИТОГО СО СКИДКОЙ: {total_after_discount} руб."
+    )
+    return ConversationHandler.END
 
 
 async def remove(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -309,7 +389,7 @@ async def timeout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
         await context.bot.send_message(
             chat_id=chat_id,
-            text=f"⏰ Время ожидания истекло, {operation} отменено. Начните заново командой /add или /modify",
+            text=f"Время ожидания истекло, {operation} отменено. Начните заново нужной командой",
         )
     except Exception as e:
         logger.exception("Не удалось отправить сообщение о таймауте: %s", e)
@@ -558,7 +638,25 @@ def build_conversation_handlers() -> List[ConversationHandler]:
         per_user=True,
     )
 
-    return [add_conv, modify_conv]
+    total_with_discount_conv = ConversationHandler(
+        entry_points=[CommandHandler("total_with_discount", total_with_discount_start)],
+        states={
+            ENTER_DISCOUNT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, total_with_discount_enter)
+            ],
+            ConversationHandler.TIMEOUT: [MessageHandler(filters.ALL, timeout)],
+        },
+        fallbacks=[
+            CommandHandler("cancel", cancel),
+            CommandHandler("total_with_discount", total_with_discount_start),
+        ],
+        conversation_timeout=CONVERSATION_TIMEOUT,
+        allow_reentry=True,
+        per_chat=True,
+        per_user=True,
+    )
+
+    return [add_conv, modify_conv, total_with_discount_conv]
 
 
 def main() -> None:
